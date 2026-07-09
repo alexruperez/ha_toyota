@@ -922,7 +922,10 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
 
 
 SERVICE_REFRESH_VEHICLE_STATUS = "refresh_vehicle_status"
+SERVICE_SEND_COMMAND = "send_command"
 ATTR_TIMEOUT_SECONDS = "timeout_seconds"
+ATTR_COMMAND = "command"
+ATTR_BEEPS = "beeps"
 
 
 def _resolve_devices_to_vins_per_entry(
@@ -957,8 +960,107 @@ def _resolve_devices_to_vins_per_entry(
     return per_entry_vins
 
 
+async def _async_dispatch_command_to_entry(
+    hass: HomeAssistant,
+    coord: DataUpdateCoordinator,
+    vins: list[str],
+    command: object,
+    beeps: int,
+) -> None:
+    """Send *command* to every VIN in *vins* using *coord*'s data snapshot.
+
+    For each successful dispatch a coordinator refresh is scheduled so
+    updated vehicle state is visible in HA without waiting for the next
+    polling cycle.
+    """
+    for vin in vins:
+        vehicle = next(
+            (
+                vd["data"]
+                for vd in coord.data
+                if vd.get("data") and vd["data"].vin == vin
+            ),
+            None,
+        )
+        if vehicle is None:
+            _LOGGER.warning(
+                "toyota.send_command: no vehicle found for vin=...%s",
+                vin[-6:],
+            )
+            continue
+        try:
+            await vehicle.post_command(command, beeps=beeps)
+            _LOGGER.debug("Command %s sent to vin=...%s", command.value, vin[-6:])
+        except Exception:
+            _LOGGER.exception(
+                "toyota.send_command: failed to send %s to vin=...%s",
+                command.value,
+                vin[-6:],
+            )
+            continue
+        # Schedule a status refresh so HA shows updated state promptly.
+        hass.async_create_task(coord.async_request_refresh())
+
+
+def _parse_send_command_call(
+    call: ServiceCall,
+) -> tuple[list[str], object, int] | None:
+    """Validate and parse a ``toyota.send_command`` ServiceCall.
+
+    Returns ``(device_ids, CommandType, beeps)`` on success or ``None`` when
+    the call should be rejected (missing target or unknown command).  Keeping
+    validation separate from dispatch reduces the cyclomatic complexity of the
+    handler.
+    """
+    from pytoyoda.models.endpoints.command import CommandType  # noqa: PLC0415
+
+    raw = call.data.get("device_id") or []
+    device_ids: list[str] = [raw] if isinstance(raw, str) else list(raw)
+    if not device_ids:
+        _LOGGER.warning("toyota.send_command called with no device target")
+        return None
+
+    command_str: str = call.data[ATTR_COMMAND]
+    beeps: int = int(call.data.get(ATTR_BEEPS, 0))
+    try:
+        command = CommandType(command_str)
+    except ValueError:
+        _LOGGER.error(  # noqa: TRY400
+            "toyota.send_command: unknown command %r. Valid values: %s",
+            command_str,
+            ", ".join(c.value for c in CommandType),
+        )
+        return None
+    return device_ids, command, beeps
+
+
+async def _handle_send_command(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Dispatch a remote command to one or more Toyota vehicles.
+
+    Resolves ``device_id`` to VINs, finds the matching Vehicle object
+    in the coordinator's current data snapshot, and calls
+    ``vehicle.post_command`` via :func:`_async_dispatch_command_to_entry`.
+    """
+    parsed = _parse_send_command_call(call)
+    if parsed is None:
+        return
+    device_ids, command, beeps = parsed
+    _LOGGER.info(
+        "toyota.send_command: command=%s beeps=%d devices=%s",
+        command.value,
+        beeps,
+        device_ids,
+    )
+    per_entry_vins = _resolve_devices_to_vins_per_entry(hass, device_ids)
+    for entry_id, vins in per_entry_vins.items():
+        coord = hass.data[DOMAIN].get(entry_id)
+        if coord is None or coord.data is None:
+            continue
+        await _async_dispatch_command_to_entry(hass, coord, vins, command, beeps)
+
+
 async def _async_register_services(hass: HomeAssistant) -> None:
-    """Register the toyota.refresh_vehicle_status service exactly once.
+    """Register toyota.refresh_vehicle_status and toyota.send_command once.
 
     Service handlers resolve their target devices to VINs via the device
     registry, set a per-VIN flag in each entry's diag bucket, and trigger
@@ -1009,6 +1111,13 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         SERVICE_REFRESH_VEHICLE_STATUS,
         _handle_refresh_vehicle_status,
     )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_SEND_COMMAND):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SEND_COMMAND,
+            lambda call: _handle_send_command(hass, call),
+        )
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
