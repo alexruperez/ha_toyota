@@ -327,7 +327,10 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         )
 
     async def _call_tagged(
-        endpoint_name: str, vin: str | None, coro: Awaitable[_T]
+        endpoint_name: str,
+        vin: str | None,
+        coro: Awaitable[_T],
+        log_level: int = logging.WARNING,
     ) -> _T:
         """Await a pytoyoda call, tagging any exception with the endpoint name.
 
@@ -335,13 +338,20 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         ``Toyota 429 on week_summary for vin=...012600``. Needed to interpret
         the inter-call spacing sweep - if one endpoint 429s disproportionately,
         spacing alone won't fix it and we pivot.
+
+        ``log_level`` controls the severity of the logged message.  Use
+        ``logging.DEBUG`` for best-effort calls that are already wrapped in
+        ``contextlib.suppress`` so their failures don't appear as spurious
+        warnings in the HA log.
         """
         try:
             return await coro
         except BaseException as ex:
             code = _error_code(ex)
             vin_tail = f"...{vin[-6:]}" if vin else "<no-vin>"
-            _LOGGER.warning("Toyota %s on %s for vin=%s", code, endpoint_name, vin_tail)
+            _LOGGER.log(
+                log_level, "Toyota %s on %s for vin=%s", code, endpoint_name, vin_tail
+            )
             raise
 
     def _build_vin_state(vin: str) -> VinState:
@@ -416,7 +426,7 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         """
         opts = _strategy_options()
         post_response = await _call_tagged(
-            "refresh_status", vin, vehicle.refresh_status()
+            "refresh_status", vin, vehicle.refresh_status(), log_level=logging.DEBUG
         )
         state.last_post_attempt_at = dt_util.now()
 
@@ -519,9 +529,11 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
             await _execute_get_only(vehicle, vin, state)
         elif decision.action is RefreshAction.HARD_DISABLED:
             # Legacy path: include /status in the standard sweep.
+            # log_level=DEBUG: errors here are suppressed and non-critical.
             with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
                 await _call_tagged(
-                    "status_legacy", vin, vehicle.update(only=["status"])
+                    "status_legacy", vin, vehicle.update(only=["status"]),
+                    log_level=logging.DEBUG,
                 )
         # SERVE_FROM_CACHE: no new fetch; the cached response gets re-injected
         # via _persist_status_for_cache() below.
@@ -534,8 +546,12 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         429s and read-timeouts are swallowed: the rest of vehicle data is fresh
         and LockStatus serves from the previous cycle's cached value.
         """
+        # log_level=DEBUG: errors here are suppressed and non-critical.
         with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
-            await _call_tagged("status_only", vin, vehicle.update(only=["status"]))
+            await _call_tagged(
+                "status_only", vin, vehicle.update(only=["status"]),
+                log_level=logging.DEBUG,
+            )
             status_data = vehicle._endpoint_data.get("status")  # noqa: SLF001
             occ = (
                 getattr(

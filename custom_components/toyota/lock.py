@@ -8,7 +8,11 @@ only registered when the vehicle reports ``door_lock_unlock_capable`` (via
 
 After a lock/unlock command is dispatched the integration triggers
 ``toyota.refresh_vehicle_status`` so the coordinator fetches fresh door-state
-data without waiting for the next polling cycle.
+data without waiting for the next polling cycle.  While the refresh is in
+flight the entity uses an *optimistic* assumed state so that HA shows the
+expected lock/unlock state immediately instead of reverting to "unknown".
+The optimistic state is cleared as soon as the coordinator delivers the first
+fresh status update after the command.
 
 .. note::
     Some Toyota models do **not** support remote unlock when the doors were
@@ -23,6 +27,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.lock import LockEntity, LockEntityDescription
+from homeassistant.core import callback
 from pytoyoda.models.endpoints.command import CommandType
 
 from .const import DOMAIN
@@ -94,12 +99,33 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
     Sending a lock/unlock command via ``async_lock`` / ``async_unlock``
     dispatches the remote command and then requests an immediate coordinator
     refresh so the updated state is reflected in HA without waiting for the
-    next polling cycle.
+    next polling cycle.  While the refresh is in flight an optimistic state
+    is applied so the UI shows the expected state immediately.
     """
+
+    def __init__(self, **kwargs: object) -> None:
+        """Initialise the lock entity with no optimistic state."""
+        super().__init__(**kwargs)
+        # Optimistic lock state set immediately after a successful command.
+        # Cleared on the next coordinator update so real data takes priority.
+        self._assumed_locked: bool | None = None
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Clear optimistic state when fresh coordinator data arrives."""
+        self._assumed_locked = None
+        super()._handle_coordinator_update()
 
     @property
     def is_locked(self) -> bool | None:
-        """Return True when the driver-seat door is locked, None when unknown."""
+        """Return True when the driver-seat door is locked, None when unknown.
+
+        Returns the optimistic state if a lock/unlock command has been sent
+        and the coordinator has not yet confirmed the result.  Otherwise
+        reads the live state from the status endpoint.
+        """
+        if self._assumed_locked is not None:
+            return self._assumed_locked
         lock_status = getattr(self.vehicle, "lock_status", None)
         if lock_status is None:
             return None
@@ -121,19 +147,23 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
 
     async def async_lock(self, **_kwargs: object) -> None:
         """Send door-lock command to the vehicle."""
-        await self._async_send_command(CommandType.DOOR_LOCK)
+        await self._async_send_command(CommandType.DOOR_LOCK, assumed_locked=True)
 
     async def async_unlock(self, **_kwargs: object) -> None:
         """Send door-unlock command to the vehicle."""
-        await self._async_send_command(CommandType.DOOR_UNLOCK)
+        await self._async_send_command(CommandType.DOOR_UNLOCK, assumed_locked=False)
 
-    async def _async_send_command(self, command: CommandType) -> None:
-        """Dispatch *command* and schedule a coordinator refresh.
+    async def _async_send_command(
+        self, command: CommandType, *, assumed_locked: bool
+    ) -> None:
+        """Dispatch *command*, apply optimistic state, and schedule a refresh.
 
         The post_command coroutine sends the remote command to the Toyota
-        gateway.  After the command is accepted the integration triggers
-        ``toyota.refresh_vehicle_status`` for this vehicle's device so the
-        coordinator wakes the modem and polls for updated door-lock state.
+        gateway.  On success the entity immediately reports the expected
+        lock/unlock state (optimistic) before the coordinator has a chance
+        to poll for the actual status.  The optimistic state is cleared on
+        the next coordinator update so real data takes priority.
+
         Any exception from post_command propagates to the caller so Home
         Assistant can surface it as a service-call failure.
         """
@@ -143,6 +173,12 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
             (self.vehicle.vin or "")[-6:],
         )
         await self.vehicle.post_command(command)
+
+        # Apply optimistic state immediately so the UI reflects the expected
+        # outcome without waiting for the full refresh cycle.
+        self._assumed_locked = assumed_locked
+        self.async_write_ha_state()
+
         await self._async_request_refresh()
 
     async def _async_request_refresh(self) -> None:

@@ -90,6 +90,8 @@ def _make_entity(vehicle: _FakeVehicle) -> ToyotaLockEntity:
     entity.index = 0
     entity.vehicle = vehicle
     entity.entity_description = DOOR_LOCK_DESCRIPTION
+    # Initialise the optimistic-state attribute added in ToyotaLockEntity.__init__.
+    entity._assumed_locked = None  # noqa: SLF001
     return entity
 
 
