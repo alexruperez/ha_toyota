@@ -7,9 +7,9 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.DEVICE_TRACKER,
-    Platform.LOCK,
     Platform.SENSOR,
     Platform.CLIMATE,
+    Platform.LOCK,
 ]
 
 # INTEGRATION ATTRIBUTES
