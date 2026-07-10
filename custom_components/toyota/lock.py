@@ -108,6 +108,10 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
         # Optimistic lock state set immediately after a successful command.
         # Cleared on the next coordinator update so real data takes priority.
         self._assumed_locked: bool | None = None
+        # Last confirmed lock state (True/False). Used as fallback when the
+        # API returns None for driver_seat.locked so the entity never reverts
+        # to "unknown" once a real state has been observed.
+        self._last_known_locked: bool | None = None
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -145,17 +149,30 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
         Returns the optimistic state if a lock/unlock command has been sent
         and the coordinator has not yet confirmed the result.  Otherwise
         reads the live state from the status endpoint.
+
+        When the API returns None for driver_seat.locked (e.g. Toyota omits
+        the field in certain status responses) the last real state is returned
+        as a fallback so the entity does not unnecessarily revert to "unknown".
+        External state changes (key fob, MyToyota app, etc.) are still picked
+        up correctly whenever the API does include a valid value.
         """
         if self._assumed_locked is not None:
             return self._assumed_locked
         lock_status = getattr(self.vehicle, "lock_status", None)
-        if lock_status is None:
-            return None
-        doors = getattr(lock_status, "doors", None)
-        if doors is None:
-            return None
-        driver_seat = getattr(doors, "driver_seat", None)
-        return getattr(driver_seat, "locked", None)
+        if lock_status is not None:
+            doors = getattr(lock_status, "doors", None)
+            if doors is not None:
+                driver_seat = getattr(doors, "driver_seat", None)
+                real_state = getattr(driver_seat, "locked", None)
+                if real_state is not None:
+                    # Update last-known state whenever the API reports a value,
+                    # regardless of whether the change came from HA or externally
+                    # (key fob, MyToyota app, etc.).
+                    self._last_known_locked = real_state
+                    return real_state
+        # API returned no lock data - keep the last known state so the entity
+        # does not flip to "unknown" while the car is temporarily silent.
+        return self._last_known_locked
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
