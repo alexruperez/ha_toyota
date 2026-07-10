@@ -532,7 +532,9 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
             # log_level=DEBUG: errors here are suppressed and non-critical.
             with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
                 await _call_tagged(
-                    "status_legacy", vin, vehicle.update(only=["status"]),
+                    "status_legacy",
+                    vin,
+                    vehicle.update(only=["status"]),
                     log_level=logging.DEBUG,
                 )
         # SERVE_FROM_CACHE: no new fetch; the cached response gets re-injected
@@ -549,7 +551,9 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         # log_level=DEBUG: errors here are suppressed and non-critical.
         with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
             await _call_tagged(
-                "status_only", vin, vehicle.update(only=["status"]),
+                "status_only",
+                vin,
+                vehicle.update(only=["status"]),
                 log_level=logging.DEBUG,
             )
             status_data = vehicle._endpoint_data.get("status")  # noqa: SLF001
