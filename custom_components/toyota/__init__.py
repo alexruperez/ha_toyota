@@ -470,7 +470,10 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
             await asyncio.sleep(10)
             try:
                 await _call_tagged(
-                    "post_status_poll", vin, vehicle.update(only=["status"])
+                    "post_status_poll",
+                    vin,
+                    vehicle.update(only=["status"]),
+                    log_level=logging.DEBUG,
                 )
             except (
                 ToyotaApiError,
@@ -529,7 +532,6 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
             await _execute_get_only(vehicle, vin, state)
         elif decision.action is RefreshAction.HARD_DISABLED:
             # Legacy path: include /status in the standard sweep.
-            # log_level=DEBUG: errors here are suppressed and non-critical.
             with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
                 await _call_tagged(
                     "status_legacy",
@@ -548,7 +550,6 @@ async def async_setup_entry(  # pylint: disable=too-many-statements # noqa: PLR0
         429s and read-timeouts are swallowed: the rest of vehicle data is fresh
         and LockStatus serves from the previous cycle's cached value.
         """
-        # log_level=DEBUG: errors here are suppressed and non-critical.
         with contextlib.suppress(ToyotaApiError, httpx.ReadTimeout):
             await _call_tagged(
                 "status_only",
@@ -1040,27 +1041,24 @@ def _parse_send_command_call(
         _LOGGER.warning("toyota.send_command called with no device target")
         return None
 
-    command_str: str = call.data[ATTR_COMMAND]
-    beeps: int = int(call.data.get(ATTR_BEEPS, 0))
+    raw_command = call.data.get(ATTR_COMMAND, "")
     try:
-        command = CommandType(command_str)
+        command = CommandType(raw_command)
     except ValueError:
-        _LOGGER.error(  # noqa: TRY400
+        valid = ", ".join(c.value for c in CommandType)
+        _LOGGER.warning(
             "toyota.send_command: unknown command %r. Valid values: %s",
-            command_str,
-            ", ".join(c.value for c in CommandType),
+            raw_command,
+            valid,
         )
         return None
+
+    beeps = int(call.data.get(ATTR_BEEPS, 0))
     return device_ids, command, beeps
 
 
 async def _handle_send_command(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Dispatch a remote command to one or more Toyota vehicles.
-
-    Resolves ``device_id`` to VINs, finds the matching Vehicle object
-    in the coordinator's current data snapshot, and calls
-    ``vehicle.post_command`` via :func:`_async_dispatch_command_to_entry`.
-    """
+    """Dispatch a raw pytoyoda command to one or more Toyota vehicles."""
     parsed = _parse_send_command_call(call)
     if parsed is None:
         return
@@ -1074,7 +1072,7 @@ async def _handle_send_command(hass: HomeAssistant, call: ServiceCall) -> None:
     per_entry_vins = _resolve_devices_to_vins_per_entry(hass, device_ids)
     for entry_id, vins in per_entry_vins.items():
         coord = hass.data[DOMAIN].get(entry_id)
-        if coord is None or coord.data is None:
+        if coord is None:
             continue
         await _async_dispatch_command_to_entry(hass, coord, vins, command, beeps)
 
