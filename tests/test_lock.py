@@ -230,9 +230,7 @@ class TestIsLocked:
             pass
 
         vehicle = _FakeVehicle(
-            lock_status=_FakeLockStatus(
-                doors=_FakeDoors(driver_seat=_NoLockedAttr())
-            )
+            lock_status=_FakeLockStatus(doors=_FakeDoors(driver_seat=_NoLockedAttr()))
         )
         entity = _make_entity(vehicle)
         assert entity.is_locked is None
@@ -273,6 +271,151 @@ class TestExtraStateAttributes:
 
 
 def test_door_lock_description_key():
-    """DOOR_LOCK_DESCRIPTION has the expected key and icon."""
+    """DOOR_LOCK_DESCRIPTION has the expected key; icon is dynamic on the entity."""
     assert DOOR_LOCK_DESCRIPTION.key == "door_lock"
-    assert DOOR_LOCK_DESCRIPTION.icon == "mdi:car-door-lock"
+    # Icon is no longer static on the description: ToyotaLockEntity.icon returns
+    # mdi:car-door-lock or mdi:car-door-lock-open depending on is_locked state.
+    assert DOOR_LOCK_DESCRIPTION.icon is None
+
+
+# ---------------------------------------------------------------------------
+# ToyotaLockEntity.icon (dynamic)
+# ---------------------------------------------------------------------------
+
+
+class TestIcon:
+    """Test the dynamic icon property."""
+
+    def test_icon_locked(self):
+        """Locked state → mdi:car-door-lock."""
+        vehicle = _FakeVehicle(
+            lock_status=_FakeLockStatus(
+                doors=_FakeDoors(driver_seat=_FakeDoor(locked=True))
+            )
+        )
+        entity = _make_entity(vehicle)
+        assert entity.icon == "mdi:car-door-lock"
+
+    def test_icon_unlocked(self):
+        """Unlocked state → mdi:car-door-lock-open."""
+        vehicle = _FakeVehicle(
+            lock_status=_FakeLockStatus(
+                doors=_FakeDoors(driver_seat=_FakeDoor(locked=False))
+            )
+        )
+        entity = _make_entity(vehicle)
+        assert entity.icon == "mdi:car-door-lock-open"
+
+    def test_icon_unknown(self):
+        """Unknown state (None) → mdi:car-door-lock (default)."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        assert entity.icon == "mdi:car-door-lock"
+
+    def test_icon_optimistic_locked(self):
+        """Optimistic locked state → mdi:car-door-lock."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        entity._assumed_locked = True  # noqa: SLF001
+        assert entity.icon == "mdi:car-door-lock"
+
+    def test_icon_optimistic_unlocked(self):
+        """Optimistic unlocked state → mdi:car-door-lock-open."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        entity._assumed_locked = False  # noqa: SLF001
+        assert entity.icon == "mdi:car-door-lock-open"
+
+
+# ---------------------------------------------------------------------------
+# ToyotaLockEntity._handle_coordinator_update (optimistic state management)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCoordinatorWithData:
+    """Coordinator stub with configurable VehicleData entries."""
+
+    def __init__(
+        self, vehicle: _FakeVehicle, *, is_cached: bool, last_successful_fetch
+    ) -> None:
+        self.data = [
+            {
+                "data": vehicle,
+                "statistics": None,
+                "metric_values": True,
+                "is_cached": is_cached,
+                "last_successful_fetch": last_successful_fetch,
+            }
+        ]
+
+    def async_add_listener(self, *_args, **_kwargs):
+        return lambda: None
+
+
+def _make_entity_with_coordinator(vehicle, coordinator) -> ToyotaLockEntity:
+    entity = ToyotaLockEntity.__new__(ToyotaLockEntity)
+    entity.coordinator = coordinator
+    entity.index = 0
+    entity.vehicle = vehicle
+    entity.entity_description = DOOR_LOCK_DESCRIPTION
+    entity._assumed_locked = None  # noqa: SLF001
+    # async_write_ha_state requires a live hass instance; stub it out for unit tests.
+    entity.async_write_ha_state = lambda: None  # type: ignore[method-assign]
+    return entity
+
+
+class TestHandleCoordinatorUpdate:
+    """Test that optimistic state is only cleared on fresh data."""
+
+    def test_clears_optimistic_on_fresh_data(self):
+        """Fresh non-cached data clears the optimistic state."""
+        from datetime import datetime
+
+        vehicle = _FakeVehicle()
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=False, last_successful_fetch=datetime.now()
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        entity._assumed_locked = True  # noqa: SLF001
+
+        entity._handle_coordinator_update()  # noqa: SLF001
+
+        assert entity._assumed_locked is None  # noqa: SLF001
+
+    def test_keeps_optimistic_on_failed_refresh(self):
+        """Failed refresh (stub with last_successful_fetch=None) keeps optimistic state."""
+        vehicle = _FakeVehicle()
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=False, last_successful_fetch=None
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        entity._assumed_locked = True  # noqa: SLF001
+
+        entity._handle_coordinator_update()  # noqa: SLF001
+
+        assert entity._assumed_locked is True  # noqa: SLF001
+
+    def test_keeps_optimistic_on_cached_data(self):
+        """Cached data (retain-on-transient) keeps optimistic state."""
+        from datetime import datetime
+
+        vehicle = _FakeVehicle()
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=True, last_successful_fetch=datetime.now()
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        entity._assumed_locked = False  # noqa: SLF001
+
+        entity._handle_coordinator_update()  # noqa: SLF001
+
+        assert entity._assumed_locked is False  # noqa: SLF001
+
+    def test_no_assumed_state_is_noop(self):
+        """When _assumed_locked is None, update passes through without error."""
+        from datetime import datetime
+
+        vehicle = _FakeVehicle()
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=False, last_successful_fetch=datetime.now()
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        # No assumed state — should not raise.
+        entity._handle_coordinator_update()  # noqa: SLF001
+        assert entity._assumed_locked is None  # noqa: SLF001

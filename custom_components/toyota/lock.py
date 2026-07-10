@@ -47,7 +47,6 @@ _LOGGER = logging.getLogger(__name__)
 DOOR_LOCK_DESCRIPTION = LockEntityDescription(
     key="door_lock",
     translation_key="door_lock",
-    icon="mdi:car-door-lock",
 )
 
 
@@ -112,9 +111,32 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Clear optimistic state when fresh coordinator data arrives."""
-        self._assumed_locked = None
+        """Clear optimistic state only when genuinely fresh data arrives.
+
+        If the coordinator fired because a refresh failed (served cached or stub
+        data), keep the optimistic state so the UI does not revert to 'unknown'
+        while the car is still processing the command.  Real data displaces the
+        optimistic state on the next successful status fetch.
+        """
+        if self._assumed_locked is not None:
+            try:
+                vd = self.coordinator.data[self.index]
+                is_fresh = (
+                    not vd.get("is_cached")
+                    and vd.get("last_successful_fetch") is not None
+                )
+            except (IndexError, TypeError):
+                is_fresh = False
+            if is_fresh:
+                self._assumed_locked = None
         super()._handle_coordinator_update()
+
+    @property
+    def icon(self) -> str:
+        """Return lock/unlock icon based on current state."""
+        if self.is_locked is False:
+            return "mdi:car-door-lock-open"
+        return "mdi:car-door-lock"
 
     @property
     def is_locked(self) -> bool | None:
