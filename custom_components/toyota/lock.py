@@ -132,6 +132,14 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
             except (IndexError, TypeError):
                 is_fresh = False
             if is_fresh:
+                # Preserve the optimistic state as a last-known fallback
+                # before discarding it.  Some Toyota models omit
+                # driver_seat.locked from the API response; without this,
+                # _last_known_locked stays None and the entity flips to
+                # "unknown" as soon as the optimistic state is cleared.
+                # is_locked() will overwrite this with the real API value
+                # if the status endpoint does include driver_seat.locked.
+                self._last_known_locked = self._assumed_locked
                 self._assumed_locked = None
         super()._handle_coordinator_update()
 

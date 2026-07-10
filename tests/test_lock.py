@@ -90,8 +90,9 @@ def _make_entity(vehicle: _FakeVehicle) -> ToyotaLockEntity:
     entity.index = 0
     entity.vehicle = vehicle
     entity.entity_description = DOOR_LOCK_DESCRIPTION
-    # Initialise the optimistic-state attribute added in ToyotaLockEntity.__init__.
+    # Initialise the optimistic-state attributes added in ToyotaLockEntity.__init__.
     entity._assumed_locked = None  # noqa: SLF001
+    entity._last_known_locked = None  # noqa: SLF001
     return entity
 
 
@@ -356,6 +357,7 @@ def _make_entity_with_coordinator(vehicle, coordinator) -> ToyotaLockEntity:
     entity.vehicle = vehicle
     entity.entity_description = DOOR_LOCK_DESCRIPTION
     entity._assumed_locked = None  # noqa: SLF001
+    entity._last_known_locked = None  # noqa: SLF001
     # async_write_ha_state requires a live hass instance; stub it out for unit tests.
     entity.async_write_ha_state = lambda: None  # type: ignore[method-assign]
     return entity
@@ -419,3 +421,63 @@ class TestHandleCoordinatorUpdate:
         # No assumed state — should not raise.
         entity._handle_coordinator_update()  # noqa: SLF001
         assert entity._assumed_locked is None  # noqa: SLF001
+
+    def test_fresh_data_preserves_assumed_as_last_known_when_api_omits_lock_field(
+        self,
+    ):
+        """Regression: fresh data clears optimistic state but preserves it in
+        _last_known_locked so is_locked does not flip to None (unknown) when the
+        Toyota API omits driver_seat.locked from the status response.
+
+        This reproduces the observed pattern where the lock entity goes to
+        'unknown' ~6 minutes after a lock/unlock action (next polling cycle)
+        because the API never includes driver_seat.locked for the vehicle.
+        """
+        from datetime import datetime
+
+        # Vehicle whose API response has no lock data (driver_seat.locked = None)
+        vehicle = _FakeVehicle(lock_status=None)
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=False, last_successful_fetch=datetime.now()
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        # Simulate: user sent lock command → optimistic True, _last_known_locked
+        # still None (never received real API lock data before).
+        entity._assumed_locked = True  # noqa: SLF001
+
+        entity._handle_coordinator_update()  # noqa: SLF001
+
+        # Optimistic state cleared (fresh data arrived).
+        assert entity._assumed_locked is None  # noqa: SLF001
+        # _last_known_locked was populated from the optimistic state so
+        # is_locked does not fall back to None (unknown).
+        assert entity._last_known_locked is True  # noqa: SLF001
+        assert entity.is_locked is True
+
+    def test_fresh_real_api_data_overrides_last_known_from_assumed(self):
+        """When fresh API data includes driver_seat.locked, that real value wins
+        over any previous _last_known_locked set from the optimistic state.
+        """
+        from datetime import datetime
+
+        vehicle = _FakeVehicle(
+            lock_status=_FakeLockStatus(
+                doors=_FakeDoors(driver_seat=_FakeDoor(locked=False))
+            )
+        )
+        coordinator = _FakeCoordinatorWithData(
+            vehicle, is_cached=False, last_successful_fetch=datetime.now()
+        )
+        entity = _make_entity_with_coordinator(vehicle, coordinator)
+        # Simulate unlock command: optimistic False, but the API might say True
+        # (e.g., car hasn't processed the command yet).
+        entity._assumed_locked = False  # noqa: SLF001
+
+        entity._handle_coordinator_update()  # noqa: SLF001
+
+        # After _handle_coordinator_update, _last_known_locked is initially set
+        # from _assumed_locked (False). Then is_locked() is called by
+        # async_write_ha_state and sees driver_seat.locked=False, confirming it.
+        assert entity._assumed_locked is None  # noqa: SLF001
+        # The real API value (False) is reflected.
+        assert entity.is_locked is False
