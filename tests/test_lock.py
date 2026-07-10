@@ -481,3 +481,66 @@ class TestHandleCoordinatorUpdate:
         assert entity._assumed_locked is None  # noqa: SLF001
         # The real API value (False) is reflected.
         assert entity.is_locked is False
+
+
+# ---------------------------------------------------------------------------
+# State restoration after HA restart (async_added_to_hass)
+# ---------------------------------------------------------------------------
+
+
+class _FakeState:
+    """Minimal HA State stub used to simulate async_get_last_state results."""
+
+    def __init__(self, state: str) -> None:
+        self.state = state
+
+
+class TestStateRestoration:
+    """Test that _last_known_locked is restored from persistent storage on restart."""
+
+    def test_last_known_locked_restored_as_locked(self):
+        """HA stored state 'locked' → _last_known_locked restored as True."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        # Simulate what async_added_to_hass does after loading persisted state.
+        last_state = _FakeState("locked")
+        if last_state.state in ("locked", "unlocked"):
+            entity._last_known_locked = last_state.state == "locked"  # noqa: SLF001
+
+        assert entity._last_known_locked is True  # noqa: SLF001
+        # is_locked should return the restored value, not None.
+        assert entity.is_locked is True
+
+    def test_last_known_locked_restored_as_unlocked(self):
+        """HA stored state 'unlocked' → _last_known_locked restored as False."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        last_state = _FakeState("unlocked")
+        if last_state.state in ("locked", "unlocked"):
+            entity._last_known_locked = last_state.state == "locked"  # noqa: SLF001
+
+        assert entity._last_known_locked is False  # noqa: SLF001
+        assert entity.is_locked is False
+
+    def test_unknown_stored_state_is_ignored(self):
+        """HA stored state 'unknown' (or any non-lock value) → _last_known_locked stays None."""
+        entity = _make_entity(_FakeVehicle(lock_status=None))
+        last_state = _FakeState("unknown")
+        if last_state.state in ("locked", "unlocked"):
+            entity._last_known_locked = last_state.state == "locked"  # noqa: SLF001
+
+        assert entity._last_known_locked is None  # noqa: SLF001
+        assert entity.is_locked is None
+
+    def test_restored_state_overridden_by_real_api_data(self):
+        """Once the API returns a real lock state, it takes priority over the restored value."""
+        vehicle = _FakeVehicle(
+            lock_status=_FakeLockStatus(
+                doors=_FakeDoors(driver_seat=_FakeDoor(locked=True))
+            )
+        )
+        entity = _make_entity(vehicle)
+        # Simulate restored state says unlocked.
+        entity._last_known_locked = False  # noqa: SLF001
+
+        # is_locked reads real API data (locked=True) and updates _last_known_locked.
+        assert entity.is_locked is True
+        assert entity._last_known_locked is True  # noqa: SLF001

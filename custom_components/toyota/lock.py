@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.lock import LockEntity, LockEntityDescription
 from homeassistant.core import callback
+from homeassistant.helpers.restore_state import RestoreEntity
 from pytoyoda.models.endpoints.command import CommandType
 
 from .const import DOMAIN
@@ -87,7 +88,7 @@ async def async_setup_entry(
     )
 
 
-class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
+class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
     """Lock entity representing the central door-lock state of a Toyota vehicle.
 
     State is derived from the driver-seat door lock reported by the Toyota
@@ -100,6 +101,9 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
     refresh so the updated state is reflected in HA without waiting for the
     next polling cycle.  While the refresh is in flight an optimistic state
     is applied so the UI shows the expected state immediately.
+
+    On HA restart the last known lock state is restored from HA's persistent
+    storage so the entity never shows as *unknown* immediately after startup.
     """
 
     def __init__(self, **kwargs: object) -> None:
@@ -110,8 +114,30 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity):
         self._assumed_locked: bool | None = None
         # Last confirmed lock state (True/False). Used as fallback when the
         # API returns None for driver_seat.locked so the entity never reverts
-        # to "unknown" once a real state has been observed.
+        # to "unknown" once a real state has been observed.  Also restored
+        # from HA persistent storage on restart via async_added_to_hass so
+        # the entity does not flip to "unknown" on every HA boot.
         self._last_known_locked: bool | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known lock state from HA persistent storage on restart.
+
+        Called by HA when the entity is added to hass (including after a
+        restart).  If a previous state was recorded, it is used to initialise
+        ``_last_known_locked`` so the entity immediately shows the last known
+        value instead of *unknown* while waiting for the first API response.
+        The restored value is overwritten as soon as the coordinator delivers
+        fresh data from the Toyota status endpoint.
+        """
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("locked", "unlocked"):
+            self._last_known_locked = last_state.state == "locked"
+            _LOGGER.debug(
+                "Restored last known lock state '%s' for vin=...%s",
+                last_state.state,
+                (getattr(self.vehicle, "vin", None) or "")[-6:],
+            )
 
     @callback
     def _handle_coordinator_update(self) -> None:
