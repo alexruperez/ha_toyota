@@ -1,0 +1,3 @@
+# Normalize line endings to LF on check-out.
+# Prevents Windows-authored CRLF commits from producing noisy diffs.
+* text=auto eol=lf
