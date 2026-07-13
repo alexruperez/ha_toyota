@@ -9,10 +9,20 @@ only registered when the vehicle reports ``door_lock_unlock_capable`` (via
 After a lock/unlock command is dispatched the integration triggers
 ``toyota.refresh_vehicle_status`` so the coordinator fetches fresh door-state
 data without waiting for the next polling cycle.  While the refresh is in
-flight the entity uses an *optimistic* assumed state so that HA shows the
-expected lock/unlock state immediately instead of reverting to "unknown".
+flight the entity uses an *optimistic* assumed state (``_attr_assumed_state``
+is ``True``) so that HA shows the expected lock/unlock state immediately with
+the "assumed" badge instead of reverting to "unknown".  During the command
+flight the entity also reports ``is_locking`` / ``is_unlocking`` so the UI
+can show an in-progress spinner.
+
+The gateway response code is checked before applying the optimistic state:
+if Toyota rejects the command (HTTP 4xx / 5xx application code) the entity
+does NOT assert the commanded state and logs a warning instead.
+
 The optimistic state is cleared as soon as the coordinator delivers the first
-fresh status update after the command.
+genuinely fresh status update after the command.  On HA restart the last
+known lock state is restored from HA's persistent storage so the entity never
+shows as *unknown* immediately after startup.
 
 .. note::
     Some Toyota models do **not** support remote unlock when the doors were
@@ -44,6 +54,12 @@ if TYPE_CHECKING:
     from . import VehicleData
 
 _LOGGER = logging.getLogger(__name__)
+
+# HTTP response codes >= this value from post_command() indicate that the
+# Toyota gateway rejected the command (4xx client error, 5xx server error).
+# When the command is rejected the entity must NOT assert an optimistic state
+# it could not actually achieve.
+_HTTP_REJECTION_THRESHOLD = 400
 
 DOOR_LOCK_DESCRIPTION = LockEntityDescription(
     key="door_lock",
@@ -96,15 +112,28 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
     the car has not yet transmitted a status update so that HA shows the
     entity as *unknown* rather than falsely locked or unlocked.
 
+    ``_attr_assumed_state`` is ``True`` so HA renders the "assumed" badge
+    whenever the entity is in an optimistic state, making it clear to the
+    user that the displayed state may not yet be confirmed by the vehicle.
+
     Sending a lock/unlock command via ``async_lock`` / ``async_unlock``
     dispatches the remote command and then requests an immediate coordinator
     refresh so the updated state is reflected in HA without waiting for the
-    next polling cycle.  While the refresh is in flight an optimistic state
-    is applied so the UI shows the expected state immediately.
+    next polling cycle.  ``is_locking`` / ``is_unlocking`` are set for the
+    duration of the command so the UI can show an in-progress spinner.
+
+    If the Toyota gateway rejects the command (response code >= 400) the
+    entity does NOT apply the optimistic state and logs a warning so the
+    failure is visible without crashing HA.
 
     On HA restart the last known lock state is restored from HA's persistent
     storage so the entity never shows as *unknown* immediately after startup.
     """
+
+    # Tell HA that this entity may show an optimistic / assumed state.
+    # HA renders a small "refresh" badge on the entity card when this is True
+    # and the state has not yet been confirmed by the coordinator.
+    _attr_assumed_state = True
 
     def __init__(self, **kwargs: object) -> None:
         """Initialise the lock entity with no optimistic state."""
@@ -231,28 +260,50 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
     ) -> None:
         """Dispatch *command*, apply optimistic state, and schedule a refresh.
 
-        The post_command coroutine sends the remote command to the Toyota
-        gateway.  On success the entity immediately reports the expected
-        lock/unlock state (optimistic) before the coordinator has a chance
-        to poll for the actual status.  The optimistic state is cleared on
-        the next coordinator update so real data takes priority.
+        Sets ``is_locking`` / ``is_unlocking`` for the duration of the command
+        so the UI can render an in-progress spinner.  Checks the gateway
+        response code before asserting the optimistic state: if the command is
+        rejected (code >= _HTTP_REJECTION_THRESHOLD) the entity logs a warning
+        and does NOT apply the commanded state.  On success the optimistic
+        state is held until the coordinator delivers fresh telemetry.
 
-        Any exception from post_command propagates to the caller so Home
-        Assistant can surface it as a service-call failure.
+        Any unexpected exception from post_command propagates to the caller so
+        Home Assistant can surface it as a service-call failure.
         """
         _LOGGER.debug(
             "Sending remote command %s to vehicle vin=...%s",
             command.value,
             (self.vehicle.vin or "")[-6:],
         )
-        await self.vehicle.post_command(command)
-
-        # Apply optimistic state immediately so the UI reflects the expected
-        # outcome without waiting for the full refresh cycle.
-        self._assumed_locked = assumed_locked
+        self._attr_is_locking = assumed_locked
+        self._attr_is_unlocking = not assumed_locked
         self.async_write_ha_state()
+        try:
+            status = await self.vehicle.post_command(command)
+            code = getattr(status, "code", None)
+            if code is not None and code >= _HTTP_REJECTION_THRESHOLD:
+                _LOGGER.warning(
+                    "%s for %s returned code %s: %s",
+                    command.value,
+                    getattr(self.vehicle, "alias", self.vehicle.vin),
+                    code,
+                    getattr(status, "message", None),
+                )
+                # Gateway rejected the command; do NOT assert a state we
+                # could not achieve.  Return without applying optimistic state
+                # so the entity stays at its last known value.
+                return
 
-        await self._async_request_refresh()
+            # Command accepted: assert the commanded state until telemetry
+            # confirms the change (which can take minutes on Toyota's side).
+            self._assumed_locked = assumed_locked
+            self.async_write_ha_state()
+
+            await self._async_request_refresh()
+        finally:
+            self._attr_is_locking = False
+            self._attr_is_unlocking = False
+            self.async_write_ha_state()
 
     async def _async_request_refresh(self) -> None:
         """Trigger refresh_vehicle_status for this vehicle's HA device."""

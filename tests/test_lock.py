@@ -544,3 +544,192 @@ class TestStateRestoration:
         # is_locked reads real API data (locked=True) and updates _last_known_locked.
         assert entity.is_locked is True
         assert entity._last_known_locked is True  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# _attr_assumed_state class attribute
+# ---------------------------------------------------------------------------
+
+
+def test_assumed_state_is_true():
+    """ToyotaLockEntity always has _attr_assumed_state=True so HA renders the
+    'assumed' badge and the user knows the state may be optimistic.
+
+    The check is done on an instance because the HA base Entity class defines
+    assumed_state as a property; the class-level attribute is shadowed by the
+    descriptor and must be evaluated via an instance.
+    """
+    entity = _make_entity(_FakeVehicle())
+    # assumed_state is the public property; _attr_assumed_state drives it.
+    assert entity.assumed_state is True
+
+
+# ---------------------------------------------------------------------------
+# _async_send_command: is_locking / is_unlocking and response-code gate
+# ---------------------------------------------------------------------------
+
+
+class _FakeCommandStatus:
+    """Minimal stub for the object returned by vehicle.post_command()."""
+
+    def __init__(self, *, code: int | None = None, message: str | None = None) -> None:
+        self.code = code
+        self.message = message
+
+
+def _make_entity_for_command(vehicle: _FakeVehicle) -> ToyotaLockEntity:
+    """Build a ToyotaLockEntity with stubs for hass-dependent methods."""
+    coordinator = _FakeCoordinator(vehicle)
+    entity = ToyotaLockEntity.__new__(ToyotaLockEntity)
+    entity.coordinator = coordinator
+    entity.index = 0
+    entity.vehicle = vehicle
+    entity.entity_description = DOOR_LOCK_DESCRIPTION
+    entity._assumed_locked = None  # noqa: SLF001
+    entity._last_known_locked = None  # noqa: SLF001
+    entity._attr_is_locking = False
+    entity._attr_is_unlocking = False
+    # Stub hass-dependent helpers that are not under test here.
+    entity.async_write_ha_state = lambda: None  # type: ignore[method-assign]
+    return entity
+
+
+class TestSendCommand:
+    """Test _async_send_command: in-progress flags and response-code gate."""
+
+    async def test_is_locking_reset_after_successful_lock(self):
+        """_attr_is_locking is False after a successful lock command."""
+
+        async def _ok_post(_cmd):
+            return _FakeCommandStatus(code=None)
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _ok_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        async def _noop_refresh():
+            pass
+
+        entity._async_request_refresh = _noop_refresh  # type: ignore[method-assign]
+
+        from pytoyoda.models.endpoints.command import CommandType
+
+        await entity._async_send_command(CommandType.DOOR_LOCK, assumed_locked=True)  # noqa: SLF001
+
+        assert entity._attr_is_locking is False
+        assert entity._attr_is_unlocking is False
+        assert entity._assumed_locked is True  # noqa: SLF001
+
+    async def test_is_unlocking_reset_after_successful_unlock(self):
+        """_attr_is_unlocking is False after a successful unlock command."""
+
+        async def _ok_post(_cmd):
+            return _FakeCommandStatus(code=None)
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _ok_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        async def _noop_refresh():
+            pass
+
+        entity._async_request_refresh = _noop_refresh  # type: ignore[method-assign]
+
+        from pytoyoda.models.endpoints.command import CommandType
+
+        await entity._async_send_command(CommandType.DOOR_UNLOCK, assumed_locked=False)  # noqa: SLF001
+
+        assert entity._attr_is_locking is False
+        assert entity._attr_is_unlocking is False
+        assert entity._assumed_locked is False  # noqa: SLF001
+
+    async def test_rejection_code_does_not_apply_optimistic_state(self):
+        """When post_command returns a 4xx/5xx code the optimistic state is NOT applied."""
+
+        async def _rejected_post(_cmd):
+            return _FakeCommandStatus(code=403, message="Forbidden")
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _rejected_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        async def _noop_refresh():
+            pass
+
+        entity._async_request_refresh = _noop_refresh  # type: ignore[method-assign]
+
+        from pytoyoda.models.endpoints.command import CommandType
+
+        await entity._async_send_command(CommandType.DOOR_LOCK, assumed_locked=True)  # noqa: SLF001
+
+        # Gateway rejected: optimistic state must NOT be set.
+        assert entity._assumed_locked is None  # noqa: SLF001
+        # In-progress flags must still be cleared in the finally block.
+        assert entity._attr_is_locking is False
+        assert entity._attr_is_unlocking is False
+
+    async def test_500_rejection_code_does_not_apply_optimistic_state(self):
+        """5xx codes are also treated as gateway rejection."""
+
+        async def _server_error_post(_cmd):
+            return _FakeCommandStatus(code=500, message="Internal Server Error")
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _server_error_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        async def _noop_refresh():
+            pass
+
+        entity._async_request_refresh = _noop_refresh  # type: ignore[method-assign]
+
+        from pytoyoda.models.endpoints.command import CommandType
+
+        await entity._async_send_command(CommandType.DOOR_UNLOCK, assumed_locked=False)  # noqa: SLF001
+
+        assert entity._assumed_locked is None  # noqa: SLF001
+        assert entity._attr_is_locking is False
+        assert entity._attr_is_unlocking is False
+
+    async def test_code_below_threshold_applies_optimistic_state(self):
+        """A 200 response code (< 400) is treated as success."""
+
+        async def _ok_post(_cmd):
+            return _FakeCommandStatus(code=200)
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _ok_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        async def _noop_refresh():
+            pass
+
+        entity._async_request_refresh = _noop_refresh  # type: ignore[method-assign]
+
+        from pytoyoda.models.endpoints.command import CommandType
+
+        await entity._async_send_command(CommandType.DOOR_LOCK, assumed_locked=True)  # noqa: SLF001
+
+        assert entity._assumed_locked is True  # noqa: SLF001
+
+    async def test_flags_reset_even_when_post_command_raises(self):
+        """is_locking / is_unlocking are reset in the finally block even if post_command raises."""
+
+        async def _raising_post(_cmd):
+            msg = "network error"
+            raise RuntimeError(msg)
+
+        vehicle = _FakeVehicle()
+        vehicle.post_command = _raising_post  # type: ignore[attr-defined]
+        entity = _make_entity_for_command(vehicle)
+
+        import pytest
+        from pytoyoda.models.endpoints.command import CommandType
+
+        with pytest.raises(RuntimeError):
+            await entity._async_send_command(CommandType.DOOR_LOCK, assumed_locked=True)  # noqa: SLF001
+
+        assert entity._attr_is_locking is False
+        assert entity._attr_is_unlocking is False
+        # Exception path: optimistic state must NOT have been applied.
+        assert entity._assumed_locked is None  # noqa: SLF001
