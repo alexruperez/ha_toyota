@@ -112,9 +112,11 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
     the car has not yet transmitted a status update so that HA shows the
     entity as *unknown* rather than falsely locked or unlocked.
 
-    ``_attr_assumed_state`` is ``True`` so HA renders the "assumed" badge
-    whenever the entity is in an optimistic state, making it clear to the
-    user that the displayed state may not yet be confirmed by the vehicle.
+    ``assumed_state`` is a dynamic property that returns ``True`` only while
+    an optimistic command is in-flight (i.e. ``_assumed_locked is not None``).
+    Once the coordinator delivers confirmed data and clears ``_assumed_locked``
+    the "assumed" badge disappears from the HA UI so the user knows the state
+    is now car-confirmed.
 
     Sending a lock/unlock command via ``async_lock`` / ``async_unlock``
     dispatches the remote command and then requests an immediate coordinator
@@ -130,11 +132,6 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
     storage so the entity never shows as *unknown* immediately after startup.
     """
 
-    # Tell HA that this entity may show an optimistic / assumed state.
-    # HA renders a small "refresh" badge on the entity card when this is True
-    # and the state has not yet been confirmed by the coordinator.
-    _attr_assumed_state = True
-
     def __init__(self, **kwargs: object) -> None:
         """Initialise the lock entity with no optimistic state."""
         super().__init__(**kwargs)
@@ -147,6 +144,18 @@ class ToyotaLockEntity(ToyotaBaseEntity, LockEntity, RestoreEntity):
         # from HA persistent storage on restart via async_added_to_hass so
         # the entity does not flip to "unknown" on every HA boot.
         self._last_known_locked: bool | None = None
+
+    @property
+    def assumed_state(self) -> bool:
+        """Return True only while an optimistic command is in-flight.
+
+        HA renders the "assumed" badge on the lock card when this property is
+        True.  By making it dynamic (instead of using the static class-level
+        ``_attr_assumed_state = True``) the badge is shown only while the
+        entity is waiting for the coordinator to confirm the commanded state,
+        and disappears once real car data arrives.
+        """
+        return self._assumed_locked is not None
 
     async def async_added_to_hass(self) -> None:
         """Restore last known lock state from HA persistent storage on restart.

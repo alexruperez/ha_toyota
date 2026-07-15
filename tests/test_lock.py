@@ -547,21 +547,51 @@ class TestStateRestoration:
 
 
 # ---------------------------------------------------------------------------
-# _attr_assumed_state class attribute
+# assumed_state dynamic property
 # ---------------------------------------------------------------------------
 
 
-def test_assumed_state_is_true():
-    """ToyotaLockEntity always has _attr_assumed_state=True so HA renders the
-    'assumed' badge and the user knows the state may be optimistic.
-
-    The check is done on an instance because the HA base Entity class defines
-    assumed_state as a property; the class-level attribute is shadowed by the
-    descriptor and must be evaluated via an instance.
+def test_assumed_state_is_true_when_optimistic():
+    """ToyotaLockEntity.assumed_state is True while _assumed_locked is set,
+    so HA renders the 'assumed' badge only during the in-flight window.
     """
     entity = _make_entity(_FakeVehicle())
-    # assumed_state is the public property; _attr_assumed_state drives it.
+    entity._assumed_locked = True  # noqa: SLF001
     assert entity.assumed_state is True
+
+
+def test_assumed_state_is_false_when_confirmed():
+    """ToyotaLockEntity.assumed_state is False when _assumed_locked is None
+    (i.e. the state has been confirmed by a real coordinator update).
+    The 'assumed' badge must NOT appear on car-confirmed state.
+    """
+    entity = _make_entity(_FakeVehicle())
+    # No assumed state set — default is None.
+    assert entity._assumed_locked is None  # noqa: SLF001
+    assert entity.assumed_state is False
+
+
+def test_assumed_state_cleared_after_coordinator_update():
+    """assumed_state transitions from True → False once _handle_coordinator_update
+    receives fresh non-cached data and clears _assumed_locked.
+    """
+    from datetime import datetime
+
+    vehicle = _FakeVehicle()
+    coordinator = _FakeCoordinatorWithData(
+        vehicle, is_cached=False, last_successful_fetch=datetime.now()
+    )
+    entity = _make_entity_with_coordinator(vehicle, coordinator)
+    entity._assumed_locked = True  # noqa: SLF001
+
+    # Before update: badge visible.
+    assert entity.assumed_state is True
+
+    entity._handle_coordinator_update()  # noqa: SLF001
+
+    # After fresh coordinator data: badge gone.
+    assert entity.assumed_state is False
+    assert entity._assumed_locked is None  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

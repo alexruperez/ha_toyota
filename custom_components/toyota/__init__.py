@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import asyncio.exceptions as asyncioexceptions
 import contextlib
+import functools
 import logging
 import os
 from datetime import datetime, timedelta
@@ -1134,7 +1135,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         hass.services.async_register(
             DOMAIN,
             SERVICE_SEND_COMMAND,
-            lambda call: _handle_send_command(hass, call),
+            functools.partial(_handle_send_command, hass),
         )
 
 
